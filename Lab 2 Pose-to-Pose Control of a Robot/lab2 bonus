@@ -1,0 +1,127 @@
+#!/usr/bin/env python
+import rospy
+import math
+import time
+from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+
+twist = Twist()
+cmd_pub=rospy.Publisher('cmd_vel',Twist,queue_size=1)
+
+
+def stop():
+	twist.linear.x = 0
+	twist.angular.z = 0
+	cmd_pub.publish(twist)
+
+
+def move(dist, linear):
+	temp = dist/linear
+	t0= rospy.Time.now().to_sec()
+	time = 0
+	while (time<temp):
+		twist.linear.x = linear
+		twist.angular.z = 0
+		cmd_pub.publish(twist)
+		t1 = rospy.Time.now().to_sec()
+		time = t1- t0
+	stop()
+	rospy.sleep(0.2)
+
+
+
+def turn(angle,angular):
+	temp = angle/angular
+	t0= rospy.Time.now().to_sec()
+	time = 0
+	while (time<temp):
+		twist.linear.x = 0
+		twist.angular.z = angular
+		cmd_pub.publish(twist)
+		t1 = rospy.Time.now().to_sec()
+		time = t1- t0
+	stop()
+	rospy.sleep(0.2)
+	
+def twistandturn(dist,linear,angular):
+	temp = dist/linear
+	t0= rospy.Time.now().to_sec()
+	time = 0
+	while (time<temp):
+		twist.linear.x = linear
+		twist.angular.z = angular
+		cmd_pub.publish(twist)
+		t1 = rospy.Time.now().to_sec()
+		time = t1- t0
+	stop()
+
+'''def sincurve(dist,linear):
+	temp = dist/linear
+	t0= rospy.Time.now().to_sec()
+	time = 0.1
+	linear = 0
+	while (not rospy.is_shutdown() and time<temp):
+		pos = linear*tsime*100
+		twist.linear.x = 50*math.sin(math.pi*pos/25)
+		angle = math.atan((2*math.pi*math.cos((math.pi*pos)/25)))
+		print (angle)
+		angular = angle/time
+		twist.angular.z = angular
+		cmd_pub.publish(twist)
+		t1 = rospy.Time.now().to_sec()
+		time = t1 - t0
+	stop()'''
+
+def sincurve(dist,linear):
+	t_step = 1/10
+	rate = rospy.Rate(1/t_step)
+	x_cur = 0
+	y_cur = 0
+	theta_cur = 0
+	
+	while not rospy.is_shutdown():
+		x_dot = math.cos(theta_cur) * linear
+		y_dot = 50*math.sin(math.pi*(x_cur+x_dot)/0.25) - y_cur
+		theta_dot = math.atan((2*math.pi*math.cos((math.pi*(x_cur+x_dot))/0.25))) - theta_cur
+		
+		angular = theta_dot/t_step
+		twist.linear.x = linear
+		twist.angular.z = angular
+		
+		x_cur = x_cur+x_dot
+		y_cur = y_cur+y_dot
+		theta_cur = theta_cur+theta_dot
+		cmd_pub.publish(twist)
+		
+		rate.sleep()
+		
+
+def publisher_node():
+	print('TODO: initialize the publisher node here, \
+            and publish wheel command to the cmd_vel topic')
+
+	#Seteup of robot
+
+	freq = 100
+	rate = rospy.Rate(freq) #10Hz
+	time = 0
+
+	linear = .2
+	angular = .3
+	
+	
+	dist = 5
+	sincurve(dist, linear)
+	pass
+	
+	
+def main():
+	try:
+		rospy.init_node('motor')
+		publisher_node()
+	except rospy.ROSInterruptException:
+		pass
+    
+
+if __name__ == '__main__':
+	main()
