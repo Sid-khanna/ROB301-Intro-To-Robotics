@@ -28,11 +28,12 @@ class ScanAnglePublisher(object):
 
         # if no valid measurements, don't publish anything
         if len(angles) == 0:
-            return
+            self.angle_pub.publish(np.nan)
+            return  np.nan
 
         # if we have multiple measurements (i.e. multiple lasers hit one or
         # more objects), take the median
-        angle = np.median(angles) +0.055
+        angle = np.median(angles) +0.052
 
         # publish the message
         angle_msg = Float64()
