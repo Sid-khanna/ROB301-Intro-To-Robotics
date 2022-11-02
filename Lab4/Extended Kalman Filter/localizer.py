@@ -25,11 +25,13 @@ class KalmanFilter(object):
         self.D = 0
 
         self.u = 0  # initialize the cmd_vel input
-        self.phi = np.nan  # initialize the measurement input
+        self.phi = 0  # initialize the measurement input
         self.phip = 0
+        self.phi_index = 0
         
         self.x_list = []
         self.P_list = []
+        self.phi_list = []
 
         self.dt = 0.0
         self.time = rospy.Time.now().to_sec()
@@ -63,10 +65,26 @@ class KalmanFilter(object):
         TODO: update state via the motion model, and update the covariance with the process noise
         """
         return
+    
+    def predict1(self, u=0): # ca
+        self.dt = rospy.Time.now().to_sec() - self.time  # calculate B
+        self.x = self.x + self.u*self.dt                 # a priori state estimate
+        self.time = rospy.Time.now().to_sec()            # set new time for next iteration
+        self.P = self.P + self.Q                         # a priori state covariance estimate
+        self.D= h/(h**2 + (d-self.x)**2)                 # calculate D
+        self.S = self.D*self.P*self.D+self.R             # measurement covariance prediction
+        self.W = self.P*self.D/self.S                    # update Kalman Gain
+        # self.P = self.P - self.W*self.S*self.W           # update state covariance
+        self.P_list.append(self.P)                       # add to list so that we can plot later
+
+        """
+        TODO: update state via the motion model, and update the covariance with the process noise
+        """
+        return
 
     ## call within run_kf to update the state with the measurement
     def measurement_update(self):
-        self.phip = math.atan(h/(self.d-self.x))
+        self.phip = math.atan2(h,d-self.x)
         """
         TODO: update state when a new measurement has arrived using this function
         """
@@ -75,13 +93,17 @@ class KalmanFilter(object):
     def run_kf(self):
         current_input = self.u
         current_measurement = self.phi
+        self.phi_index += 1
+        self.phi_list.append(self.phi)
+        rospy.loginfo(self.phi)
         if math.isnan(current_measurement) == False:
             self.measurement_update()
             self.predict()
-            self.x = self.x + self.W*(self.phi - self.phip)
+            self.x = self.x + self.W*(self.phi - self.phip) # new state estimate
             self.x_list.append(self.x)
         else:
-            self.predict()
+            print("ANGLE == NAN")
+            self.predict1()      # use a priori state estimate as estimate
             self.x_list.append(self.x)
         self.state_pub.publish(self.x)
         
@@ -110,7 +132,13 @@ if __name__ == "__main__":
         rate.sleep()
     x = np.array(kf.x_list)
     P = np.array(kf.P_list)
-    plt.plot(x)
-    plt.show()
-    plt.plot(P)
+    Phi = np.array(kf.phi_list)
+    fig, axs = plt.subplots(3)
+    fig.suptitle('Plots')
+    axs[0].plot(x)
+    axs[0].set_title('State')
+    axs[1].plot(P)
+    axs[1].set_title('Covariance')
+    axs[2].plot(Phi)
+    axs[2].set_title("Angle")
     plt.show()
