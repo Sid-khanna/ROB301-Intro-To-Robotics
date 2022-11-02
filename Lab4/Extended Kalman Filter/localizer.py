@@ -108,3 +108,9 @@ if __name__ == "__main__":
     while not rospy.is_shutdown():
         kf.run_kf()
         rate.sleep()
+    x = np.array(kf.x_list)
+    P = np.array(kf.P_list)
+    plt.plot(x)
+    plt.show()
+    plt.plot(P)
+    plt.show()
