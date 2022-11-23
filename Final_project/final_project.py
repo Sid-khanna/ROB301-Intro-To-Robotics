@@ -20,6 +20,7 @@ class BayesLoc:
         self.colour_map = colour_map
         self.probability = p0
         self.state_prediction = np.zeros(self.num_states)
+        self.guess = 4
         self.line = 0 # value of line
         self.desired = 320
         self.kd = 0.0074
@@ -28,6 +29,11 @@ class BayesLoc:
         self.integral = 0
         self.lasterror = 0
         self.twist = Twist()
+        self.temp1 = []
+        self.temp2 = []
+        self.temp3 = []
+        
+        
 
         self.cur_colour = None  # most recent measured colour
 
@@ -42,30 +48,55 @@ class BayesLoc:
         B = 2
         Y = 3
         L = 4
-        sphere = 600
         guess = None
         
         colour_codes = [
-        [235, 67, 127],  # red
-        [150, 180, 145],  # green
-        [176 , 164, 182],  # blue
-        [200, 177, 100],  # yellow
-        [175, 163, 167],  # line
+        [232, 79, 128],  # red
+        [153, 179, 162],  # green
+        [179 , 165, 185],  # blue
+        [180, 173, 166],  # yellow
+        [170, 159, 162],  # line
         ]
         
-        if rgb[0] > 200 and rgb[1] < 100 and rgb[2] > 115:
-            guess = 'RED'
-        elif rgb[0] < 160 and rgb[1] > 160 and rgb[2] < 170:
-            guess = 'GREEN'
-        elif rgb[0] > 160 and rgb[1] > 150 and rgb[2] > 175:
-            guess = 'BLUE'
-        elif rgb[0] > 170 and rgb[0] < 210 and rgb[1] > 140 and rgb[2] > 75:
-            guess = 'YELLOW'
-        else:
-            guess = 'LINE'
+        guesses = []
+        
+        for i in range(len(colour_codes)):
+            dist = np.linalg.norm(np.array(self.cur_colour) - np.array(colour_codes[i]))
+            guesses.append(dist)
+            
+        guess = guesses.index(min(guesses))
 
-        print("Guess", guess)
-        # print(self.cur_colour)
+        # if rgb[0] > 200 and rgb[1] < 100 and rgb[2] > 115:
+        #     guess = 'RED'
+        # elif rgb[0] < 160 and rgb[1] > 160 and rgb[2] < 170:
+        #     guess = 'GREEN'
+        # elif rgb[0] > 160 and rgb[1] > 150 and rgb[2] > 175:
+        #     guess = 'BLUE'
+        # elif rgb[0] > 175 and rgb[0] < 210 and rgb[1] > 140 and rgb[2] > 75:
+        #     guess = 'YELLOW'
+        # else:
+        #     guess = 'LINE'
+        
+        # if guess == R:
+        #     guess = 'RED'
+        # elif guess == G:
+        #     guess = 'GREEN'
+        # elif guess == B:
+        #     guess = 'BLUE'
+        # elif guess == Y:  
+        #     guess = 'YELLOW'
+        # elif guess == L:
+        #     guess = 'LINE'
+
+        self.guess = guess
+        print(guess)
+        self.temp1.append(self.cur_colour[0])
+        self.temp2.append(self.cur_colour[1])
+        self.temp3.append(self.cur_colour[2])
+        
+        
+        
+        
         
     def get_colour(self):
         # ''' Guess which colour we are looking at'''
@@ -103,7 +134,7 @@ class BayesLoc:
         self.integral += error
         derivative = error - self.lasterror
         correction = self.kp*error + self.ki*self.integral + self.kd*derivative
-        self.twist.linear.x= 0.08
+        self.twist.linear.x= 0.02
         self.twist.angular.z = correction	
         self.cmd_pub.publish(self.twist)
         self.lasterror= error
@@ -111,20 +142,39 @@ class BayesLoc:
         
     def fwd(self):
         correction = 0
-        self.twist.linear.x= 0.08
+        self.twist.linear.x= 0.02
         self.twist.angular.z = correction
         self.cmd_pub.publish(self.twist)
 
     def move(self):
-        if self.
+        if self.guess == 4:
+           self.control()
+        else:
+            t0 = rospy.Time.now().to_sec()
+            while(t0 - rospy.Time.now().to_sec() > -0.1+):
+                self.fwd()
+                
 
     def wait_for_colour(self):
         """Loop until a colour is received."""
-        rate = rospy.Rate(100)
+        rate = rospy.Rate(20)
         while not rospy.is_shutdown() and self.cur_colour is None:
             rate.sleep()
 
     def state_model(self, u):
+        for i in range(self.num_states):
+            if u == 1:
+                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
+                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.10
+                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.85
+            if u == 0:
+                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
+                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.90
+                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
+            if u == -1:
+                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.85
+                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.10
+                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
         """
         State model: p(x_{k+1} | x_k, u)
 
@@ -136,9 +186,7 @@ class BayesLoc:
         Measurement model p(z_k | x_k = colour) - given the pixel intensity,
         what's the probability that of each possible colour z_k being observed?
         """
-        if self.cur_colour is None:
-            self.wait_for_colour()
-
+        
         prob = np.zeros(len(colour_codes))
 
         """
@@ -157,8 +205,53 @@ class BayesLoc:
         state (office)
         """
 
-    def state_update(self):
+    def state_update(self,col):
         rospy.loginfo("updating state")
+        R_I = [3, 4, 7]
+        G_I = [1, 5, 9]
+        B_I = [2, 6, 10]
+        Y_I = [0, 8]
+        
+        if col == 0:
+            for i in R_I:
+                self.probability[i] = self.state_prediction[i] * 0.6
+            for i in G_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in B_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in Y_I:
+                self.probability[i] = self.state_prediction[i] * 0.2
+        elif col == 1:
+            for i in R_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in G_I:
+                self.probability[i] = self.state_prediction[i] * 0.6
+            for i in B_I:
+                self.probability[i] = self.state_prediction[i] * 0.2
+            for i in Y_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+        elif col == 2:
+            for i in R_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in G_I:
+                self.probability[i] = self.state_prediction[i] * 0.2
+            for i in B_I:
+                self.probability[i] = self.state_prediction[i] * 0.6
+            for i in Y_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+        elif col == 3:
+            for i in R_I:
+                self.probability[i] = self.state_prediction[i] * 0.15
+            for i in G_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in B_I:
+                self.probability[i] = self.state_prediction[i] * 0.05
+            for i in Y_I:
+                self.probability[i] = self.state_prediction[i] * 0.65
+
+        
+    
+        
         """
         TODO: Complete the state update function: update self.probabilities
         with the probability of being at each state
@@ -170,7 +263,7 @@ if __name__ == "__main__":
     # This is the known map of offices by colour
     # 0: red, 1: green, 2: blue, 3: yellow, 4: line
     # current map starting at cell #2 and ending at cell #12
-    colour_map = [3, 0, 1, 2, 2, 0, 1, 2, 3, 0, 1]
+    colour_map = [3, 1, 2, 0, 0, 1, 2, 0, 3, 1, 2]
 
     # TODO calibrate these RGB values to recognize when you see a colour
     # NOTE: you may find it easier to compare colour readings using a different
@@ -200,8 +293,11 @@ if __name__ == "__main__":
         adding your own high level and low level planning + control logic
         """
         # localizer.get_colour()
-        localizer.control()
+        localizer.move()
         rate.sleep()
 
     rospy.loginfo("finished!")
+    print(np.average(localizer.temp1))
+    print(np.average(localizer.temp2))
+    print(np.average(localizer.temp3))
     rospy.loginfo(localizer.probability)
