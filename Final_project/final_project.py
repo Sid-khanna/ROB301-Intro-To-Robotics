@@ -5,6 +5,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float64MultiArray, UInt32
 import numpy as np
 import colorsys
+import matplotlib.pyplot as plt
 
 
 class BayesLoc:
@@ -19,11 +20,26 @@ class BayesLoc:
         self.colour_codes = colour_codes
         self.colour_map = colour_map
         self.probability = p0
-        self.state_prediction = np.zeros(self.num_states)
+       
+        self.prev_colour = 100
         self.guess = 4
-        self.line = 0 # value of line
+        self.colour = 4
+        self.line_idx = 0 # value of line
+        #Apriori
+        self.state_prediction = np.zeros(self.num_states)
+        #posteriori
+        self.probability = (1/self.num_states)*np.ones(self.num_states)
+        self.u = 1
+        #predict
+        self.add = 0
+        self.conf = 0
+        self.counter = 0
+        self.goal = [4,3,6]
+        self.update = np.zeros((self.num_states,self.num_states))
+        #control
+        self.hsv = (0, 0, 0)
         self.desired = 320
-        self.kd = 0.0074
+        self.kd = 0.009
         self.ki = 0.000004
         self.kp = 0.0039
         self.integral = 0
@@ -32,7 +48,8 @@ class BayesLoc:
         self.temp1 = []
         self.temp2 = []
         self.temp3 = []
-        
+        self.prev_line_idx = 0
+        self.on_line = False
         
 
         self.cur_colour = None  # most recent measured colour
@@ -58,101 +75,80 @@ class BayesLoc:
         [170, 159, 162],  # line
         ]
         
+        hsv_colour_codes = [
+            [0.9539, 0.7082, 0.8960], #red
+            [0.4181,0.1585,0.6905], #g
+            [0.775,0.0656,0.6355], #b
+            [0.1327,0.1504,0.6372], #y
+            [0.3997,0.0257,0.587]  # line
+        ]
+        
         guesses = []
+        hsv_guesses = []
         
         for i in range(len(colour_codes)):
             dist = np.linalg.norm(np.array(self.cur_colour) - np.array(colour_codes[i]))
             guesses.append(dist)
             
         guess = guesses.index(min(guesses))
-
-        # if rgb[0] > 200 and rgb[1] < 100 and rgb[2] > 115:
-        #     guess = 'RED'
-        # elif rgb[0] < 160 and rgb[1] > 160 and rgb[2] < 170:
-        #     guess = 'GREEN'
-        # elif rgb[0] > 160 and rgb[1] > 150 and rgb[2] > 175:
-        #     guess = 'BLUE'
-        # elif rgb[0] > 175 and rgb[0] < 210 and rgb[1] > 140 and rgb[2] > 75:
-        #     guess = 'YELLOW'
+        
+        
+        self.hsv = colorsys.rgb_to_hsv(self.cur_colour[0] / 255.0, self.cur_colour[1] / 255.0, self.cur_colour[2] / 255.0)
+        distance = 100000
+        j = 4
+        
+        # if abs(self.hsv[1]<0.099):
+        #     hsv_guess = 4
         # else:
-        #     guess = 'LINE'
-        
-        # if guess == R:
-        #     guess = 'RED'
-        # elif guess == G:
-        #     guess = 'GREEN'
-        # elif guess == B:
-        #     guess = 'BLUE'
-        # elif guess == Y:  
-        #     guess = 'YELLOW'
-        # elif guess == L:
-        #     guess = 'LINE'
-
-        self.guess = guess
-        print(guess)
-        self.temp1.append(self.cur_colour[0])
-        self.temp2.append(self.cur_colour[1])
-        self.temp3.append(self.cur_colour[2])
+        for i in range(len(hsv_colour_codes)):
+        #         d = abs(self.hsv[0] - hsv_colour_codes[i][0])
+        #         if d < distance and d<0.1:
+        #             j = i
+        #             distance = d
+                # hsv_guess = j
+            dist = np.linalg.norm(np.array(self.hsv) - np.array(hsv_colour_codes[i]))
+            hsv_guesses.append(dist)
+        hsv_guess = hsv_guesses.index(min(hsv_guesses))
+        self.temp1.append(self.hsv[0])
+        self.temp2.append(self.hsv[1])
+        self.temp3.append(self.hsv[2])
+        self.guess = hsv_guess
         
         
-        
+        #hsv_guess = hsv_guesses.index(min(hsv_guesses))
+        # print(self.hsv)
+        # print('hsv:',hsv_guess)
         
         
     def get_colour(self):
-        # ''' Guess which colour we are looking at'''
-        # R = 0
-        # G = 1
-        # B = 2
-        # Y = 3
-        # L = 4
-        # sphere = 15
-        # guess = None
-        
-        # if sum(self.cur_colour - self.colour_codes[R])**2 < sphere:
-        #     guess = 'RED'
-        # elif sum(self.cur_colour - self.colour_codes[G])**2 < sphere:
-        #     guess = 'GREEN'
-        # elif sum(self.cur_colour - self.colour_codes[B])**2 < sphere:
-        #     guess = 'BLUE'
-        # elif sum(self.cur_colour - self.colour_codes[Y])**2 < sphere:
-        #     guess = 'YELLOW'
-        # elif sum(self.cur_colour - self.colour_codes[L])**2 < sphere:
-        #     guess = 'LINE'
-
-        # # print("Guess", guess)
+        self.colour = self.guess
         pass
 
     def line_callback(self, msg):
         """
         TODO: Complete this with your line callback function from lab 3.
         """
-        self.line = msg.data
+        self.prev_line_idx = self.line_idx
+        self.line_idx = msg.data
         pass
     
-    def control(self):
-        error = self.desired - self.line
+    def control(self, speed):
+        error = self.desired - self.line_idx
         self.integral += error
         derivative = error - self.lasterror
         correction = self.kp*error + self.ki*self.integral + self.kd*derivative
-        self.twist.linear.x= 0.02
+        self.twist.linear.x= speed
         self.twist.angular.z = correction	
         self.cmd_pub.publish(self.twist)
         self.lasterror= error
         # print(error, correction)
         
-    def fwd(self):
-        correction = 0
-        self.twist.linear.x= 0.02
-        self.twist.angular.z = correction
-        self.cmd_pub.publish(self.twist)
-
-    def move(self):
-        if self.guess == 4:
-           self.control()
+    def line(self):
+        diff = abs(self.prev_line_idx - self.line_idx)
+        if diff < 250 and 50 < self.line_idx < 590:
+            return True
         else:
-            t0 = rospy.Time.now().to_sec()
-            while(t0 - rospy.Time.now().to_sec() > -0.1+):
-                self.fwd()
+            return False
                 
 
     def wait_for_colour(self):
@@ -161,7 +157,7 @@ class BayesLoc:
         while not rospy.is_shutdown() and self.cur_colour is None:
             rate.sleep()
 
-    def state_model(self, u):
+    def state_predict(self, u):
         for i in range(self.num_states):
             if u == 1:
                 self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
@@ -197,16 +193,23 @@ class BayesLoc:
 
         return prob
 
-    def state_predict(self):
+    '''def state_predict(self):
         rospy.loginfo("predicting state")
         """
         TODO: Complete the state prediction function: update
         self.state_prediction with the predicted probability of being at each
         state (office)
-        """
+        """'''
+    def normalize(self, l):
+        norm = 0
+        for i in range(len(l)):
+            norm += l[i]
+        for i in range (len(l)):
+            l[i] = l[i]/norm
+        return l
 
     def state_update(self,col):
-        rospy.loginfo("updating state")
+        # rospy.loginfo("updating state")
         R_I = [3, 4, 7]
         G_I = [1, 5, 9]
         B_I = [2, 6, 10]
@@ -248,14 +251,70 @@ class BayesLoc:
                 self.probability[i] = self.state_prediction[i] * 0.05
             for i in Y_I:
                 self.probability[i] = self.state_prediction[i] * 0.65
-
-        
+                
+                
+        self.probability = self.normalize(self.probability)
+        print(f'Probability {self.probability}')
+        best_guess = max(self.probability)
+        best_location = np.where(best_guess == self.probability)
+        return best_location, best_guess
     
-        
-        """
-        TODO: Complete the state update function: update self.probabilities
-        with the probability of being at each state
-        """
+    def fwd(self):
+        correction = 0
+        self.twist.linear.x= 0.05
+        self.twist.angular.z = correction
+        self.cmd_pub.publish(self.twist)
+    
+    def stop(self):
+        correction = 0
+        self.twist.linear.x= 0
+        self.twist.angular.z = correction
+        self.cmd_pub.publish(self.twist)
+    
+    def run(self):
+        self.move()
+        self.state_predict(self.u)
+        self.add, self.conf = self.state_update(self.guess)
+        self.update[self.counter] = np.array(self.probability)
+        print(self.add, self.guess, self.conf)
+        self.counter += 1
+        if self.add in self.goal and self.conf >0.5:
+            #do the whole turning thing
+            pass
+                
+    def move(self):
+        self.get_colour()
+        line_t = self.line()
+        if self.colour == 4 and line_t:
+            self.control(0.08)
+        elif not line_t:
+            self.fwd()
+            rospy.sleep(0.5)
+            self.get_colour()
+            if self.colour != self.prev_colour:
+                self.prev_colour = self.colour
+                self.state_predict(self.u)
+                self.add, self.conf = self.state_update(self.guess)
+                # self.update[self.counter] = np.array(self.probability)
+                print(f'addr: {self.add}, guess: {self.colour}, conf: {self.conf}')
+            # self.counter += 1
+            # if self.add in self.goal and self.conf >0.5:
+            #     self.fwd()
+            #     rospy.sleep(4.5)
+            #     self.turn()
+            #     self.fwd()
+            #     rospy.sleep(4.5)
+            # else:
+            self.fwd()
+        elif line_t and self.colour < 4:
+            self.colour = 4
+            self.control(0.05)
+        else:
+            self.stop()
+        #     rospy.sleep(1)
+        #     self.fwd()
+            
+
 
 
 if __name__ == "__main__":
@@ -278,6 +337,14 @@ if __name__ == "__main__":
         [175, 163, 167],  # line
     ]
 
+    hsv_colour_codes = [
+        [0.95, 0.22, 0.74], #red
+        [0.33,0.175,0.647], #g
+        [0.625,0.34,0.65], #b
+        [0.14,0.22,0.75], #y
+        [0.83333,0.0175,0.670]  # line
+    ]
+    
     # initial probability of being at a given office is uniform
     p0 = np.ones_like(colour_map) / len(colour_map)
 
@@ -285,7 +352,7 @@ if __name__ == "__main__":
 
     rospy.init_node("final_project")
     rospy.sleep(0.5)
-    rate = rospy.Rate(10)
+    rate = rospy.Rate(50)
 
     while not rospy.is_shutdown():
         """
@@ -297,7 +364,8 @@ if __name__ == "__main__":
         rate.sleep()
 
     rospy.loginfo("finished!")
-    print(np.average(localizer.temp1))
-    print(np.average(localizer.temp2))
-    print(np.average(localizer.temp3))
+    plt.plot(localizer.probability)
+    # print(np.average(localizer.temp1))
+    # print(np.average(localizer.temp2))
+    # print(np.average(localizer.temp3))
     rospy.loginfo(localizer.probability)
