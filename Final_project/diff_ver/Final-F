@@ -1,0 +1,509 @@
+#!/usr/bin/env python
+
+######################################################################
+# IMPORTS
+######################################################################
+
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image as im 
+import random
+import math
+import rospy
+from geometry_msgs.msg import Twist
+from std_msgs.msg import String, Float64MultiArray
+from std_msgs.msg import UInt32
+import colorsys
+
+
+###########################################################
+# OUR STARTUP
+###########################################################
+
+# TERMINAL #1 - launching the robot
+# ssh ubuntu@100.69.127.124
+# password: "turtlebot"
+# roslaunch turtlebot3_bringup turtlebot3_robot.launch --screen
+
+# TERMINAL #2 - launching the camera
+# ssh ubuntu@100.69.127.124
+# password: "turtlebot"
+# roslaunch camera camera.launch
+
+# TERMINAL #3 - running roscore
+# roscore
+
+# TERMINAL #4 - running bayesian location code
+# rosrun final_project final_project.py
+
+
+######################################################################
+# HELPER FUNCTIONS
+######################################################################
+
+class BayesLoc:
+
+    # initialisation function for class
+    def __init__(self):
+
+        ################################################################
+        # ROSPY SUBSCRIBERS AND PUBLISHERS
+
+        self.colour_sub = rospy.Subscriber("mean_img_rgb", Float64MultiArray, self.colour_callback)
+        self.line_sub = rospy.Subscriber("line_idx", UInt32, self.line_callback)
+        self.cmd_pub = rospy.Publisher("cmd_vel", Twist, queue_size=1)
+	
+        ################################################################
+        # LOCALISATION MODELS
+
+        # define the actual configuration of the layout of rooms
+        self.offices = {2: "yellow",
+                        3: "green",
+                        4: "blue",
+                        5: "orange",
+                        6: "orange",
+                        7: "green",
+                        8: "blue",
+                        9: "orange",
+                        10: "yellow",
+                        11: "green",
+                        12: "blue"}
+        self.coloursss = list(self.offices.values())
+        
+        # defining the measurement model
+        #                      b      g     y     o
+        measurement_model = [[0.60, 0.20, 0.05, 0.05], # b
+                             [0.20, 0.60, 0.05, 0.05], # g
+                             [0.05, 0.05, 0.65, 0.20], # y
+                             [0.05, 0.05, 0.15, 0.60], # o
+                             [0.10, 0.10, 0.10, 0.10]] # nothing
+        self.mm = np.array(measurement_model)
+
+        # defining the state model
+        #                 -1    0     +1
+        state_model = [[0.85, 0.05, 0.00], # one back
+                       [0.15, 0.90, 0.15], # stay
+                       [0.00, 0.05, 0.85]] # one forward
+        self.ss = np.array(state_model)
+
+        # defines the colour mapping scheme using our robot's sensor
+        # calibrated every lab day
+        self.colour_map_scheme = [[123,  35, 178], # blue
+                                  [ 65,  69, 157], # green
+                                  [ 24,  63, 192], # yellow
+                                  [169, 148, 220]] # orange
+
+        ################################################################
+        # LOCALISATION PARAMETERS
+
+        # hold index of the black line index from "line_idx"
+        self.temp = 0
+
+        # vector holds values to prevent mishaps in line reading from 
+        # confusing our localisation model, used to decide self.line
+        self.line_check = [True, True, True, True]
+
+        # returns True if we are on the line and False if at an office
+        self.line = True
+
+        # holds rgb value messages from "mean_img_rgb"
+        self.measuring = [0, 0, 0] 
+
+        # at any point, holds the colour that rgb currently reports
+        # 0 = blue | 1 = green | 2 = yellow | 3 = orange
+        self.colour_guess = -1
+
+        # keeps a vector of all of the measured distances between 
+        # colours over the course of one office
+        self.recorded_vals = []
+
+        # set to True when robot arrives at an office and set back to 
+        # False when robot leaves the office
+        self.one_office = False 
+
+        # probability vector for all offices updated in bayesian localisation
+        self.probs = [(1/len(self.offices))]*len(self.offices)
+
+        ################################################################
+        # ACTUATION PARAMETERS
+
+        self.desired = 320 # centre of the line
+        self.i_error = 0 # integral error
+        self.d_error = 0 # derivative error
+        self.last_error = 0 # last proportional error 
+
+        self.kp = 0.005 # proportional gain
+        self.ki = 0.00002 # integral gain
+        self.kd = 0.002 # derivative gain
+
+        self.f_speed = 0.04 # m/s
+        self.t_speed = 0.3 # rad/s
+        self.r = 10 # Hz
+       
+        ################################################################
+        # DELIVERY PARAMETERS
+
+        # reports the room number the robot is at if probabilities are 
+        # sufficently confident in the prediction, otherwise, reports -1
+        # which represents that the location is unknown
+        self.where_we_think_were_at = -1
+
+        # stores vector of all locations we need to deliver mail to
+        # we were notifed that deliveries did not need to be in order
+        self.destinations = [12, 8, 11]
+
+        # how many steps of turning one way, wait time, turning other way
+        self.init_count = [30, 20, 30] 
+        self.count = self.array_copy()
+
+        # True when the robot is in the process of delivering, else False
+        self.delivering = False
+
+        return 
+    
+    #########################################################################################
+    # IMPORTANT FUNCTIONS BENEATH
+    #########################################################################################
+
+    # callback function that receives the most recent colour measurement from the camera
+    # returns an array of rgb values
+    def colour_callback(self, msg):
+        self.measuring = np.array(msg.data) #[r,g,b]
+        self.guess_colour()
+        return
+
+    # get information from the normal camera and each time check if the line is there
+    def line_callback(self, msg):
+        self.temp = msg.data
+        
+        # instantaneous line reading only if not delivering
+        if self.delivering == False:
+            # check if the line is there or not for a quick step
+            black_line_index = self.temp
+            if black_line_index > 540 or black_line_index < 100: 
+                cur_line = False
+            else:
+                cur_line = True
+
+            # appends and pops from our list for robustness before a switch
+            self.line_check.append(cur_line)
+            self.line_check.pop(0)
+
+            # set whether or not we believe we're at a line
+            # only switch when we have 4 aggreeable values in a row
+            if sum(self.line_check) == 4:
+                self.line = True
+            elif sum(self.line_check) == 0:
+                self.line = False
+        
+        return
+
+    # executes one step of bayesian localisation after arriving at an office
+    def one_pred_update(self, u, z):
+
+        # unloading values from the class attributes
+        probs = self.probs
+        coloursss = self.coloursss
+
+        # STATE PREDICTION
+        probs_apriori = [0]*len(probs)
+
+        for i in range(len(probs)):
+            split = probs[i]
+            for t in range(-1, 2, 1):
+                if (t+i)>=len(probs):
+                    val = self.ss[t+1][u]
+                    probs_apriori[t+i-len(probs)] += val*split
+                else:
+                    val = self.ss[t+1][u]
+                    probs_apriori[t+i] += val*split
+
+        summ = sum(probs_apriori)
+        for i in range(len(probs_apriori)):
+            probs_apriori[i] = probs_apriori[i]/summ
+            probs_apriori[i] = float(f'{probs_apriori[i]:.4f}')
+
+        # STATE UPDATE
+        probs_apostiri = [0]*len(probs_apriori)
+
+        for i in range(len(probs_apriori)):
+            split = probs_apriori[i]
+            mycol = self.colour_assignment(coloursss[i])
+            multiplier = self.mm[z][mycol]
+            probs_apostiri[i] = probs_apriori[i]*multiplier
+
+        summ = sum(probs_apostiri)
+        for i in range(len(probs_apostiri)):
+            probs_apostiri[i] = probs_apostiri[i]/summ
+            probs_apostiri[i] = float(f'{probs_apostiri[i]:.4f}')
+    
+        # updating the apostiri guess into the class attribute
+        self.probs = probs_apostiri
+
+        return
+
+    # after measuring an office, this function decides from the probability 
+    # vector whether or not we're confident enough to estimate our room number
+    def decide_if_at_a_room(self):
+        probs = self.probs
+        best_guess_ind = np.argmax(np.array(probs))
+        room_nums = list(self.offices.keys())
+
+        # if we know with 50% probability that we think we're at a room
+        # we set our location estimate to this room number
+        if probs[best_guess_ind] >= 0.5:
+            loc = room_nums[best_guess_ind]
+            self.where_we_think_were_at = loc
+        else:
+            self.where_we_think_were_at = -1
+        
+        # if we know where we are and this is a location to deliver to
+        # we set delivering to True, so that we switch to delivery mode in PID
+        if self.where_we_think_were_at in self.destinations:
+            self.delivering = True
+
+    # performs one step of PID control
+    def good_pid_control(self):
+
+        twist = Twist()
+
+        # when we are not delivering, we follow the line on PID or go straight on offices
+        if self.delivering == False:
+
+            # we should drive straight if we don't see the line and reset PID
+            if self.line == False:
+                twist.linear.x = self.f_speed
+                twist.angular.z = 0
+                self.i_error = 0
+                self.d_error = 0
+                self.last_error = 0
+
+            # in transitions, PID occurs but the turn speed is suppressed
+            elif sum(self.line_check) <= 3:
+                actual = self.temp
+                error = self.desired - actual
+                self.i_error += error
+                self.d_error = error - self.last_error
+                twist.linear.x = self.f_speed
+                twist.angular.z = 0.05 * (self.ki*self.i_error + self.kp*error + self.kd*self.d_error)*self.t_speed
+                self.last_error = error
+
+            # if we see the line, we perform PID
+            elif self.line == True:
+                actual = self.temp
+                error = self.desired - actual
+                self.i_error += error
+                self.d_error = error - self.last_error
+                twist.linear.x = self.f_speed
+                twist.angular.z = (self.ki*self.i_error + self.kp*error + self.kd*self.d_error)*self.t_speed
+                self.last_error = error
+
+            # if there are no longer any destinations, we no longer need to walk
+            elif len(self.destinations) == 0:
+                twist.linear.x = 0
+                twist.angular.z = 0
+        
+        # when we are delivering, we need to turn one way, wait, and then turn the other way
+        else:
+
+            # turn one way
+            if self.count[0] > 0:
+                twist.linear.x = 0
+                twist.angular.z = self.t_speed
+                self.count[0] -= 1
+            
+            # wait for a bit
+            elif self.count[1] > 0:
+                twist.linear.x = 0
+                twist.angular.z = 0
+                self.count[1] -= 1
+            
+            # turn in the other direction
+            elif self.count[2] > 0:
+                twist.linear.x = 0
+                twist.angular.z = -1*self.t_speed
+                self.count[2] -= 1
+
+            # you're done the delivery, reset the counting parameters
+            # delivery is now over!
+            else:
+                self.count = self.array_copy()
+                self.destinations.remove(self.where_we_think_were_at)
+                self.delivering = False
+                self.one_office = False
+
+        # after deciding what the right command with all of the 
+        # if statements we're ready to publish
+        self.cmd_pub.publish(twist)
+
+        return
+
+    # MAIN FUNCTION FOR ALL SYNTHESIS 
+    # function handles all operations for localisation and movement
+    def walking_around(self):
+
+        if self.delivering == False:
+
+            # if there is no line, we must be at an office
+            if self.line == False:
+
+                # we are now at an office and we've just reached it
+                if self.one_office == False:
+                    # empty the array that stores the colour readings over the entire office
+                    # reset this to be be empty, ready to recieve new colour guesses
+                    self.recorded_vals = []
+                    # record first colour guess
+                    self.recorded_vals.append(self.guess_colour())
+                    # we're arrived at the office so this is now True
+                    self.one_office = True
+
+                # we are still in the same office, so we want to comtinue appending guesses
+                else:
+                    self.recorded_vals.append(self.guess_colour())
+
+            # we just finished collecting values at an office and now we see the line again
+            # this means that this office is done and we should do some stuff!
+            # we want to guess the one colour for this office and do baysian localisation
+            # then we also want to check whether or not we're confident enough to deliver mail
+            elif self.line == True and self.one_office == True:
+
+                # we'll use the first 4 readings because the contrast with the floor 
+                # results in better colour detection (at the beginning)
+                temp_recorded_vals = self.recorded_vals[0:4]
+
+                # average the probability for each colour over all guesses
+                avg_vals = [0, 0, 0, 0]
+                for guess in temp_recorded_vals:
+                    for i in range(len(guess)):
+                        avg_vals[i] += guess[i] / 4
+                
+                # colour will now hold the best guess for this office 
+                # which is the maximum of inverse distances
+                colour = np.argmax(np.array(avg_vals))
+
+                # we can now do one step of baysian localisation
+                # 1 is the input because the robot is assumed to always move forwards
+                u = self.moving_assignment(1) 
+                z = colour
+                self.one_pred_update(u, z)
+                
+                # after the baysian localisation, we can see if we're confident enough about 
+                # where we are to start stopping at locations and deliver mail
+                self.decide_if_at_a_room()
+
+                # we have a graphic which pops up to show the probabilities over the rooms
+                self.states_printer()
+
+                # and lastly we mark that we've finished at this specific office
+                if self.delivering == False:
+                    self.one_office = False
+        
+        # after doing any steps for localisation, we can take a step forwards using our PID
+        self.good_pid_control()
+
+        return
+
+
+    #########################################################################################
+    # HELPER FUNCTIONS BENEATH
+    #########################################################################################
+
+    # remakes the counts vectors using the initial count that's prestored
+    def array_copy(self):
+        return [self.init_count[0], self.init_count[1], self.init_count[2]]
+
+    # plots a current step to see the probability distribution
+    # also allows us to stop the code and debug more efficently
+    def states_printer(self):
+        room_nums = list(self.offices.keys())
+        colours = list(self.offices.values())
+        plt.bar(room_nums, height = self.probs, color = colours)
+        plt.ylim(0, 1)
+        plt.title("CURRENT STATE - APOSTIRI")
+        plt.show()
+        return
+
+    # switches the measured colours to array indices for the MM
+    def colour_assignment(self, colour):
+        if colour == "blue":
+            return 0
+        elif colour == "green":
+            return 1
+        elif colour == "yellow":
+            return 2
+        elif colour == "orange":
+            return 3
+        elif colour == "nothing":
+            return 4
+        return False
+
+    # switches the input to array indices for the SS
+    def moving_assignment(self, input):
+        if input == -1000:
+            return 1
+        return input+1
+
+    # calculates the euclidean of the detected colour to the target colour
+    def close(self, x, y):
+        eucl_dist = math.sqrt((x[0]-y[0])**2 + (x[1]-y[1])**2 + (x[2]-y[2])**2)
+        return eucl_dist
+
+    # function takes in the rgb value measured by the camera and the 
+    # previously calibrated colour values to estimate the colour on screen
+    # also returns the inverse distance vectors for probabilities
+    def guess_colour(self):
+        rgb = self.measuring
+        colours = self.colour_map_scheme
+
+        # for each of orange, blue, green, yellow, figure out how close
+        # that value is compared to its reference colours
+        vals = []
+        for colour in colours:
+            out = self.close(rgb, colour)
+            vals.append(out)
+        
+        # inverse each value such that colours with smaller distances have 
+        # higher weights (they are better guesses if they are close in distance)
+        total = 0
+        for i in range(len(vals)):
+            vals[i] = 1/vals[i]
+            total += vals[i]
+
+        # normalize the results so that they add to 1, making probabilities
+        for i in range(len(vals)):
+            vals[i] /= total
+
+        # the current highest probability is the current guess
+        self.colour_guess = np.argmax(np.array(vals))
+
+        # we're returning the probabiltiies to be stored over an office
+        return vals
+
+
+
+###########################################################################
+# MAIN SCRIPT
+###########################################################################
+print("************************************************\n\n")
+
+if __name__ == "__main__":
+
+    # initalise our robot node
+    robot = BayesLoc()
+    rospy.init_node("final_project")
+    rospy.sleep(0.5)
+    rate = rospy.Rate(20)
+
+    while not rospy.is_shutdown():
+        robot.walking_around()
+        rate.sleep()
+
+    rospy.loginfo("finished!")
+
+
+
+
+###########################################################################
+# CLEAN UP
+###########################################################################
+print("\n\n************************************************")
