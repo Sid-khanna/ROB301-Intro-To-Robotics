@@ -292,7 +292,8 @@ class BayesLoc:
         elif not line_t:
 
             self.state_predict(self.u)
-
+            x = [2,3,4,5,6,7,8,9,10,11,12]
+            y = self.probabiliy
             num = self.num_states
             plt.bar(x, y)
             plt.title("Probability Plot " + str(num))
