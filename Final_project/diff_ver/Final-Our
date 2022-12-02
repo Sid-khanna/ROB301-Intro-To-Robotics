@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import rospy
-import time
 import math
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float64MultiArray, UInt32
@@ -11,50 +10,61 @@ import matplotlib.pyplot as plt
 
 class BayesLoc:
     def __init__(self, p0, colour_codes, colour_map):
+
+        # set up subcribers
         self.colour_sub = rospy.Subscriber(
             "mean_img_rgb", Float64MultiArray, self.colour_callback
         )
         self.line_sub = rospy.Subscriber("line_idx", UInt32, self.line_callback)
         self.cmd_pub = rospy.Publisher("cmd_vel", Twist, queue_size=1)
 
+        # read in input vals
         self.num_states = len(p0)
         self.colour_codes = colour_codes
         self.colour_map = colour_map
-        self.probability = p0
        
+        # store values of colour, line, etc
         self.prev_colour = 100
-        self.guess = 4
-        self.colour = 4
+        self.guess = 4 # what colour we think we are at
+        self.colour = []
         self.line_idx = 0 # value of line
-        #Apriori
+        self.prev_line_idx = 0
+        self.hsv = (0, 0, 0)                                        # hsv values
+        self.cur_colour = None  # most recent measured colour
+        self.cur_colour_val = None # not a list
+        self.prev_colour = None  # most recent measured colour
+        self.col_distance = [0, 0, 0, 0, 0] # distance from what colour we were just at
+        self.meas_model = [0, 0, 0, 0]
+
+        # A priori predictions
         self.state_prediction = np.zeros(self.num_states)
-        #posteriori
-        self.probability = (1/self.num_states)*np.ones(self.num_states)
+
+        # A posteriori predictions
+        self.probability = p0
+
+        # input to state model (always 1 since we are assuming fwd motion)
         self.u = 1
-        #predict
-        self.add = 0
-        self.conf = 0
-        self.counter = 0
-        self.goal = [4,3,6]
-        self.update = np.zeros((self.num_states,self.num_states))
-        #control
-        self.hsv = (0, 0, 0)
-        self.desired = 320
-        self.kd = 0.009
-        self.ki = 0.000004
-        self.kp = 0.0039
-        self.integral = 0
-        self.lasterror = 0
-        self.num = 0
-        self.twist = Twist()
-        self.temp1 = []
+
+        # current prediction
+        self.add = 0                                                # address we are currently at
+        self.conf = 0                                               # probability that we are at that address
+        self.counter = 0                                            # how many addresses we have been to so far
+        self.goal = [10,3,6]                                         # what addresses we need to stop at
+        self.update = np.zeros((self.num_states,self.num_states))   # probabilities over time (at each step)
+
+        # PID control 
+        self.desired = 320                                          # set point for PID when line following
+        self.kd = 0.009                                             # derivative gain
+        self.ki = 0.000004                                          # integral gain
+        self.kp = 0.0039                                            # proportional gain
+        self.integral = 0                                           # integral term of PID
+        self.lasterror = 0                                          # derivative term of PID
+        self.twist = Twist()                          
+
+        # store data for plotting, calibration, etc              
+        self.temp1 = [] 
         self.temp2 = []
         self.temp3 = []
-        self.prev_line_idx = 0
-        self.on_line = False
-        
-
-        self.cur_colour = None  # most recent measured colour
 
     def colour_callback(self, msg):
         """
@@ -62,6 +72,7 @@ class BayesLoc:
         """
         self.cur_colour = np.array(msg.data)  # [r, g, b]
         rgb = self.cur_colour
+        self.hsv = colorsys.rgb_to_hsv(self.cur_colour[0] / 255.0, self.cur_colour[1] / 255.0, self.cur_colour[2] / 255.0)
         R = 0
         G = 1
         B = 2
@@ -69,6 +80,7 @@ class BayesLoc:
         L = 4
         guess = None
         
+        # colour codes - calibrate every lab session
         colour_codes = [
         [232, 79, 128],  # red
         [153, 179, 162],  # green
@@ -78,53 +90,70 @@ class BayesLoc:
         ]
         
         hsv_colour_codes = [
-            [0.9539, 0.7082, 0.8960], #red
-            [0.4181,0.1585,0.6905], #g
-            [0.775,0.0656,0.6355], #b
-            [0.1327,0.1504,0.6372], #y
-            [0.3997,0.0257,0.587]  # line
+            [0.9366, 0.5167, 0.7709], #red
+            [0.4136,0.2730,0.6463], #g
+            [0.7592,0.0669,0.6090], #b
+            [0.1677,0.1829,0.6304], #y
+            [0.0625,0.0272,0.5875]  # line
         ]
         
+        # store euclidian distances from every colour (for guessing which colour we are at)
         guesses = []
         hsv_guesses = []
         
+        # find distance for RGB colours
         for i in range(len(colour_codes)):
             dist = np.linalg.norm(np.array(self.cur_colour) - np.array(colour_codes[i]))
             guesses.append(dist)
-            
-        guess = guesses.index(min(guesses))
+
         
+        guess = guesses.index(min(guesses)) #store final guess for RGB colour
         
-        self.hsv = colorsys.rgb_to_hsv(self.cur_colour[0] / 255.0, self.cur_colour[1] / 255.0, self.cur_colour[2] / 255.0)
-        distance = 100000
-        j = 4
+        #####################################  testing using other people's code ###########################
+        # distance = 100000
+        # j = 4
         
         # if abs(self.hsv[1]<0.099):
         #     hsv_guess = 4
         # else:
-        for i in range(len(hsv_colour_codes)):
+        # for i in range(len(hsv_colour_codes)):
         #         d = abs(self.hsv[0] - hsv_colour_codes[i][0])
         #         if d < distance and d<0.1:
         #             j = i
         #             distance = d
                 # hsv_guess = j
+        ######################################################################################################
+
+        # find euclidian distance for HSV colours
+        for i in range(len(hsv_colour_codes)):
             dist = np.linalg.norm(np.array(self.hsv) - np.array(hsv_colour_codes[i]))
             hsv_guesses.append(dist)
-        hsv_guess = hsv_guesses.index(min(hsv_guesses))
+            self.col_distance[i] = dist
+        
+        hsv_guess = hsv_guesses.index(min(hsv_guesses)) # return colour closest to what colour we are at
+
+        # store data for calibration
         self.temp1.append(self.hsv[0])
         self.temp2.append(self.hsv[1])
         self.temp3.append(self.hsv[2])
+
+        # store colour guess in class attribute
         self.guess = hsv_guess
-        
-        
-        #hsv_guess = hsv_guesses.index(min(hsv_guesses))
-        # print(self.hsv)
-        # print('hsv:',hsv_guess)
-        
-        
+
+        #keep track of the last 4 colours
+        self.colour.append(hsv_guess)
+        # get rid of 1st guess
+        if len(self.colour) > 20:
+            self.colour.pop(0)
+            
     def get_colour(self):
-        self.colour = self.guess
-        pass
+        # check if all the colours are the same in self.colour
+        if all(x==self.colour[0] for x in self.colour) and len(self.colour) > 19 and self.colour[-1] != 4:
+            # we can be confident that we are at an office and which colour office it is
+            self.cur_colour_val = self.colour[-1]
+            return True
+        else:
+            return False
 
     def line_callback(self, msg):
         """
@@ -134,6 +163,7 @@ class BayesLoc:
         self.line_idx = msg.data
         pass
     
+    #implement PID control
     def control(self, speed):
         error = self.desired - self.line_idx
         self.integral += error
@@ -143,8 +173,42 @@ class BayesLoc:
         self.twist.angular.z = correction	
         self.cmd_pub.publish(self.twist)
         self.lasterror= error
-        # print(error, correction)
-        
+
+    #just drive forward @ speed
+    def fwd(self, speed):
+        correction = 0
+        self.twist.linear.x= speed
+        self.twist.angular.z = correction
+        self.cmd_pub.publish(self.twist)
+    
+    #stop
+    def stop(self):
+        correction = 0
+        self.twist.linear.x= 0
+        self.twist.angular.z = correction
+        self.cmd_pub.publish(self.twist)
+
+    # turn
+    def turn(self, direction):
+
+        if direction == 'cw':
+            direction = 1
+        elif direction == 'ccw':
+            direction = -1
+        else:
+            direction = 0
+            print("which way fam")
+
+        self.twist.linear.x = 0
+        self.twist.angular.z = 0.25 * direction
+
+        t0 = rospy.Time.now()
+        while rospy.Time.now() - t0 < 2:
+            self.cmd_pub.publish(self.twist)
+            pass
+        self.stop()
+
+    # determine if we are on the line or not
     def line(self):
         diff = abs(self.prev_line_idx - self.line_idx)
         if diff < 250 and 50 < self.line_idx < 590:
@@ -153,39 +217,68 @@ class BayesLoc:
             return False
                 
 
-    def wait_for_colour(self):
-        """Loop until a colour is received."""
-        rate = rospy.Rate(20)
-        while not rospy.is_shutdown() and self.cur_colour is None:
-            rate.sleep()
+    # def wait_for_colour(self):
+    #     """Loop until a colour is received."""
+    #     rate = rospy.Rate(20)
+    #     while not rospy.is_shutdown() and self.cur_colour is None:
+    #         rate.sleep()
 
+    # use state model to predict where we should be
+    # u will always be = 1 since we are only moving fwd
     def state_predict(self, u):
         for i in range(self.num_states):
             if u == 1:
-                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
-                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.10
-                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.85
-            if u == 0:
-                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
-                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.90
-                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
-            if u == -1:
-                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.85
-                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.10
-                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
-        """
-        State model: p(x_{k+1} | x_k, u)
+                self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0
+                self.state_prediction[(i)%self.num_states] += self.probability[i]*0.002
+                self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.98
+            # if u == 0:
+            #     self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.05
+            #     self.state_prediction[(i)%self.num_states] += self.probability[i]*0.90
+            #     self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
+            # if u == -1:
+            #     self.state_prediction[(i-1)%self.num_states] += self.probability[i]*0.85
+            #     self.state_prediction[(i)%self.num_states] += self.probability[i]*0.10
+            #     self.state_prediction[(i+1)%self.num_states] += self.probability[i]*0.05
+                
+        
 
-        TODO: complete this function
-        """
-
-    def measurement_model(self, x):
+    def measurement_model(self):
         """
         Measurement model p(z_k | x_k = colour) - given the pixel intensity,
         what's the probability that of each possible colour z_k being observed?
         """
+        R_I = [3, 4, 7]
+        G_I = [1, 5, 9]
+        B_I = [2, 6, 10]
+        Y_I = [0, 8]
         
-        prob = np.zeros(len(colour_codes))
+        prob = np.zeros(len(colour_codes) - 1)
+
+        # measurement model
+        for i in range(len(prob)):
+            if i == 0:
+                s = 0
+                for office in R_I:
+                    s += self.probability[office]
+                prob[i] = 1/self.col_distance[i]*s
+            if i == 1:
+                s = 0
+                for office in G_I:
+                    s += self.probability[office]
+                prob[i] = 1/self.col_distance[i]*s
+            if i == 2:
+                s = 0
+                for office in B_I:
+                    s += self.probability[office]
+                prob[i] = 1/self.col_distance[i]*s
+            if i == 3:
+                s = 0
+                for office in Y_I:
+                    s += self.probability[office]
+                prob[i] = 1/self.col_distance[i]*s
+                
+        # normalize probability to sum to 1
+        self.meas_model = self.normalize(prob)
 
         """
         TODO: You need to compute the probability of states. You should return a 1x5 np.array
@@ -195,13 +288,6 @@ class BayesLoc:
 
         return prob
 
-    '''def state_predict(self):
-        rospy.loginfo("predicting state")
-        """
-        TODO: Complete the state prediction function: update
-        self.state_prediction with the predicted probability of being at each
-        state (office)
-        """'''
     def normalize(self, l):
         norm = 0
         for i in range(len(l)):
@@ -210,6 +296,7 @@ class BayesLoc:
             l[i] = l[i]/norm
         return l
 
+    # update state based on measurement model, etc
     def state_update(self,col):
         # rospy.loginfo("updating state")
         R_I = [3, 4, 7]
@@ -217,6 +304,9 @@ class BayesLoc:
         B_I = [2, 6, 10]
         Y_I = [0, 8]
         
+        # self.measurement_model()
+                
+        # use measurement model to update probabilities
         if col == 0:
             for i in R_I:
                 self.probability[i] = self.state_prediction[i] * 0.6
@@ -254,102 +344,105 @@ class BayesLoc:
             for i in Y_I:
                 self.probability[i] = self.state_prediction[i] * 0.65
                 
-                
+        # # normalize
         self.probability = self.normalize(self.probability)
+
+
+        # print
         print(f'Probability {self.probability}')
-        best_guess = max(self.probability)
-        best_location = np.where(best_guess == self.probability)
-        return best_location, best_guess
+
+        # find state with highest probability
+        max_prob = max(self.probability)                       # highest probability
+        best_location = np.where(max_prob == self.probability) # address
+
+        return best_location, max_prob
     
-    def fwd(self,speed):
-        correction = 0
-        self.twist.linear.x= speed
-        self.twist.angular.z = correction
-        self.cmd_pub.publish(self.twist)
+    # def run(self):
+    #     self.move()
+    #     self.state_predict(self.u)
+    #     self.add, self.conf = self.state_update(self.guess)
+    #     self.update[self.counter] = np.array(self.probability)
+    #     print(self.add, self.guess, self.conf)
+    #     self.counter += 1
+    #     if self.add in self.goal and self.conf >0.5:
+    #         #do the whole turning thing
+    #         pass
     
-    def stop(self):
-        correction = 0
-        self.twist.linear.x= 0
-        self.twist.angular.z = correction
-        self.cmd_pub.publish(self.twist)
-    
-    def run(self):
-        self.move()
-        self.state_predict(self.u)
-        self.add, self.conf = self.state_update(self.guess)
-        self.update[self.counter] = np.array(self.probability)
-        print(self.add, self.guess, self.conf)
-        self.counter += 1
-        if self.add in self.goal and self.conf >0.5:
-            #do the whole turning thing
-            pass
-                
-    def move(self,office):
-        self.get_colour()
+    # put everything together
+    def move(self):
+        #check if we are confident that we are at an office
+        at_office = self.get_colour()
+        print(f'at_office{at_office}')
+
+        #check if we think we are on a line
         line_t = self.line()
-        if self.colour == 4 and line_t:
+        # print(f'cur_colour_val {self.cur_colour_val}, line {line_t}')
+
+        if self.guess == 4 and line_t:
+            # we are sure we are on the line
             self.control(0.08)
-        elif not line_t:
 
-            self.state_predict(self.u)
-            x = [2,3,4,5,6,7,8,9,10,11,12]
-            y = self.probabiliy
-            num = self.num_states
-            plt.bar(x, y)
-            plt.title("Probability Plot " + str(num))
-            plt.xlabel("Locations")
-            plt.ylabel("Probability")
-            plt.savefig(str(num)+".png")
-            plt.close()
-            self.num = self.num +1
+        elif not line_t and at_office and self.guess != 4:
+            # we can be sure that we are at an office
+            # move fwd a bit
+            self.fwd(0.04)
+            rospy.sleep(0.5)
 
-            self.fwd(0.05)
-            time.sleep(5)
-            self.add, self.conf = self.state_update(self.guess)
-            print(f'addr: {self.add}, guess: {self.colour}, conf: {self.conf}')
+            # check if we are still 
+            if self.get_colour() and self.prev_colour != self.cur_colour_val:
+                # predict which state we are in
+                self.prev_colour = self.cur_colour_val
+                self.state_predict(self.u)
+                self.add, self.conf = self.state_update(self.colour[-1])
 
-            if self.add == office:
-                confidence = 0.5
-                if self.conf>confidence:
-                    self.stop() #stops in middle
-                    time.sleep(1)
-                    # self.turn
-                    self.fwd(0.02)
-                    time.sleep(1)
+                # self.update[self.counter] = np.array(self.probability)
+                print(f'addr: {self.add}, colour: {self.cur_colour_val}, conf: {self.conf}')
                 
-            self.fwd(0.025)
-            time.sleep(1)
+                # stuff for plotting
+                x = [2,3,4,5,6,7,8,9,10,11,12]
+                y = self.probability
 
-            # self.fwd()
-            # rospy.sleep(0.5)
-            # self.get_colour()
-            # if self.colour != self.prev_colour:
-            #     self.prev_colour = self.colour
-            #     self.state_predict(self.u)
-            #     self.add, self.conf = self.state_update(self.guess)
-            #     # self.update[self.counter] = np.array(self.probability)
-            #     print(f'addr: {self.add}, guess: {self.colour}, conf: {self.conf}')
-            # # self.counter += 1
-            # # if self.add in self.goal and self.conf >0.5:
-            # #     self.fwd()
-            # #     rospy.sleep(4.5)
-            # #     self.turn()
-            # #     self.fwd()
-            # #     rospy.sleep(4.5)
-            # # else:
-            # self.fwd()
-            
-        elif line_t and self.colour < 4:
-            self.colour = 4
+                plt.bar(x, y)
+                plt.title("Probability Plot " + str(self.counter))
+                plt.xlabel("Locations")
+                plt.ylabel("Probability")
+                plt.savefig(str(self.counter)+".png")
+                plt.close()
+                self.counter += 1
+                
+                # if we have one guess for which address we are at
+                # and that address is in our list of addresses to visit
+                # and the probability for which address is > 0.5
+                # then stop and turn and stuff
+                # if (len(self.add) == 1):
+                    
+                #     if (len(self.add) == 1) and (self.add[0] in self.goal) and self.conf >0.5:
+                #         # self.fwd()
+                #         # rospy.sleep(4.5)
+                #         self.stop()
+                #         self.turn('cw')
+                #         rospy.sleep(1)
+                #         self.turn('ccw')
+                #         self.fwd(0.1)
+                #         rospy.sleep(4.5)
+                #     else:
+                #         self.fwd(0.1)
+                    
+                #     # empty the array storing colour
+                self.colour = []
+                self.cur_colour_val = None
+                
+            else:
+                pass
+        
+        # not confident in our guess, move slow but still PID
+        elif line_t and self.guess < 4:
             self.control(0.05)
+        # this should never happen but just in case
         else:
-            self.stop()
-        #     rospy.sleep(1)
-        #     self.fwd()
+            print('something is wrong')
+            self.fwd(0.05)
             
-
-
-
 if __name__ == "__main__":
 
     # This is the known map of offices by colour
@@ -370,13 +463,7 @@ if __name__ == "__main__":
         [175, 163, 167],  # line
     ]
 
-    hsv_colour_codes = [
-        [0.95, 0.22, 0.74], #red
-        [0.33,0.175,0.647], #g
-        [0.625,0.34,0.65], #b
-        [0.14,0.22,0.75], #y
-        [0.83333,0.0175,0.670]  # line
-    ]
+    
     
     # initial probability of being at a given office is uniform
     p0 = np.ones_like(colour_map) / len(colour_map)
@@ -385,7 +472,7 @@ if __name__ == "__main__":
 
     rospy.init_node("final_project")
     rospy.sleep(0.5)
-    rate = rospy.Rate(50)
+    rate = rospy.Rate(10)
 
     while not rospy.is_shutdown():
         """
@@ -397,8 +484,9 @@ if __name__ == "__main__":
         rate.sleep()
 
     rospy.loginfo("finished!")
-    plt.plot(localizer.probability)
-    # print(np.average(localizer.temp1))
-    # print(np.average(localizer.temp2))
-    # print(np.average(localizer.temp3))
+    plt.show()
+    # plt.plot(localizer.probability)
+    print(np.average(localizer.temp1))
+    print(np.average(localizer.temp2))
+    print(np.average(localizer.temp3))
     rospy.loginfo(localizer.probability)
